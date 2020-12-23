@@ -20,7 +20,7 @@ export KBUILD_BUILD_HOST="github"
 
 
 PATH="${TOOLCHAINDIR}/bin:${TOOLCHAINDIR}/lib:${TOOLCHAINDIR}/include:${PATH}" \
-make KALLSYMS_EXTRA_PASS=1 -j ${buildspeed} deb-pkg CROSS_COMPILE=${TOOLCHAINDIR}/bin/x86_64-linux- LOCALVERSION=-"tkg-gcc-lto" -s;
+make KALLSYMS_EXTRA_PASS=1 KCFLAGS="-fdevirtualize-at-ltrans -fgraphite-identity -floop-nest-optimize" -j ${buildspeed} deb-pkg CROSS_COMPILE=${TOOLCHAINDIR}/bin/x86_64-linux- LOCALVERSION=-"tkg-gcc-lto" -s;
 
 echo "======================VERIFY CLANG==============================="
 cat ./include/generated/compile.h
