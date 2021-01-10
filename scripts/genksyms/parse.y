@@ -489,10 +489,8 @@ asm_phrase_opt:
 	;
 
 export_definition:
-	EXPORT_SYMBOL_KEYW '(' STRING ',' IDENT ')' ';'
-		{ export_symbol((*$3)->string, (*$5)->string); $$ = $7; }
-	| EXPORT_SYMBOL_KEYW '(' IDENT ')' ';'
-		{ export_symbol("", (*$3)->string); $$ = $5; }
+	EXPORT_SYMBOL_KEYW '(' IDENT ')' ';'
+		{ export_symbol((*$3)->string); $$ = $5; }
 	;
 
 

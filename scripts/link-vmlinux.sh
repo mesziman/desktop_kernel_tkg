@@ -56,7 +56,7 @@ modpost_link()
 		${KBUILD_VMLINUX_LIBS}				\
 		--end-group"
 
-	${LDFINAL} ${KBUILD_LDFLAGS} -r ${KBUILD_MODPOST_LDFLAGS} -o ${1} ${objects}
+	${LD} ${KBUILD_LDFLAGS} -r -o ${1} ${objects}
 }
 
 objtool_link()
@@ -92,15 +92,13 @@ vmlinux_link()
 	local objects
 	local strip_debug
 
-	info LDFINAL ${output}
+	info LD ${output}
 
 	# skip output file argument
 	shift
 
 	# The kallsyms linking does not need debug symbols included.
-	# except for LTO because gcc 10 LTO changes the layout of the data segment
-	# with --strip-debug
-	if [ "$output" != "${output#.tmp_vmlinux.kallsyms}" -a -z "$CONFIG_LTO" ] ; then
+	if [ "$output" != "${output#.tmp_vmlinux.kallsyms}" ] ; then
 		strip_debug=-Wl,--strip-debug
 	fi
 
@@ -113,7 +111,7 @@ vmlinux_link()
 			--end-group				\
 			${@}"
 
-		${LDFINAL} ${KBUILD_LDFLAGS} ${LDFLAGS_vmlinux}	\
+		${LD} ${KBUILD_LDFLAGS} ${LDFLAGS_vmlinux}	\
 			${strip_debug#-Wl,}			\
 			-o ${output}				\
 			-T ${lds} ${objects}
@@ -171,8 +169,8 @@ gen_btf()
 	printf '\1' | dd of=${2} conv=notrunc bs=1 seek=16 status=none
 }
 
-# Create ${2} .S file with all symbols from the ${1} object file
-kallsyms_s()
+# Create ${2} .o file with all symbols from the ${1} object file
+kallsyms()
 {
 	info KSYM ${2}
 	local kallsymopt;
@@ -188,54 +186,14 @@ kallsyms_s()
 	if [ -n "${CONFIG_KALLSYMS_BASE_RELATIVE}" ]; then
 		kallsymopt="${kallsymopt} --base-relative"
 	fi
-	kallsymopt="${kallsymopt} $3 $4 $5"
 
-	local afile="${2}"
-
-	(
-	if [ -n "$CONFIG_LTO" -a -n "$CONFIG_KALLSYMS_SINGLE" -a -n "$CONFIG_CC_IS_GCC" ] &&
-		( ${OBJDUMP} -h ${1} | grep -q gnu\.lto) ; then
-        # workaround for slim LTO gcc-nm not outputing static symbols
-        # http://gcc.gnu.org/PR60016
-        # generate a fake symbol table based on the LTO function sections.
-        # This unfortunately "knows" about the internal LTO file format
-        # and only works for functions
-
-	# read the function names directly from the LTO object
-	objdump -h ${1} |
-		awk '/gnu\.lto_[a-z]/ { gsub(/\.gnu\.lto_/,""); gsub(/\..*/, ""); print "0 t " $2 } '
-	# read the non LTO symbols with readelf (which doesn't use the LTO plugin,
-	# so we only get pure ELF symbols)
-	# readelf doesn't handle ar, so we have to expand the objects
-	echo ${1} | sed 's/ /\n/g' | grep built-in.a | while read i ; do
-		${AR} t $i | while read j ; do readelf -s $j ; done
-	done | awk 'NF >= 8 { print "0 t " $8 } '
-	# now handle the objects
-	echo ${1} | sed 's/ /\n/g' | grep '\.o$' | while read i ; do
-		readelf -s $i
-	done | awk 'NF >= 8 {
-	if ($8 !~ /Name|__gnu_lto_slim|\.c(\.[0-9a-f]+)?/) { print "0 t " $8 }
-	}'
-	else
-		${NM} -n ${1}
-	fi
-	) | scripts/kallsyms ${kallsymopt} > ${afile}
-}
-
-kallsyms_o()
-{
 	local aflags="${KBUILD_AFLAGS} ${KBUILD_AFLAGS_KERNEL}               \
 		      ${NOSTDINC_FLAGS} ${LINUXINCLUDE} ${KBUILD_CPPFLAGS}"
 
-	${CC} $3 $4 $5 ${aflags} -c -o ${2} ${1}
-}
+	local afile="`basename ${2} .o`.S"
 
-# Create ${2} .o file with all symbols from the ${1} object file
-kallsyms()
-{
-	local s=`basename $2 .o`.S
-	kallsyms_s "$1" $s $3 $4 $5 $6 $7
-	kallsyms_o $s $2
+	${NM} -n ${1} | scripts/kallsyms ${kallsymopt} > ${afile}
+	${CC} ${aflags} -c -o ${2} ${afile}
 }
 
 # Perform one step in kallsyms generation, including temporary linking of
@@ -265,11 +223,6 @@ sorttable()
 # Delete output files in case of error
 cleanup()
 {
-	# don't delete for make -i
-	case "$MFLAGS" in
-	*-i*) return ;;
-	esac
-
 	rm -f .btf.*
 	rm -f .tmp_System.map
 	rm -f .tmp_vmlinux*
@@ -321,7 +274,7 @@ fi;
 ${MAKE} -f "${srctree}/scripts/Makefile.build" obj=init need-builtin=1
 
 #link vmlinux.o
-info LDFINAL vmlinux.o
+info LD vmlinux.o
 modpost_link vmlinux.o
 objtool_link vmlinux.o
 
@@ -348,24 +301,7 @@ fi
 kallsymso=""
 kallsymso_prev=""
 kallsyms_vmlinux=""
-kallsymsorel=""
-if [ -n "${CONFIG_KALLSYMS}" -a -n "${CONFIG_KALLSYMS_SINGLE}" ]; then
-	# Generate kallsyms from the top level object files
-	# this is slightly off, and has wrong addresses,
-	# but gives us the conservative max length of the kallsyms
-	# table to link in something with the right size.
-	info KALLSYMS1 .tmp_kallsyms1.o
-	kallsyms_s "${KBUILD_VMLINUX_OBJS} ${KBUILD_VMLINUX_LIBS}" \
-		.tmp_kallsyms1.S \
-		--all-symbols \
-		"--pad-file=.kallsyms_pad"
-	# split the object into kallsyms with relocations and no relocations
-	# the relocations part does not change in step 2
-	kallsyms_o .tmp_kallsyms1.S .tmp_kallsyms1.o -DNO_REL
-	kallsyms_o .tmp_kallsyms1.S .tmp_kallsyms1rel.o -DNO_SYMS
-	kallsymso=.tmp_kallsyms1.o
-	kallsymsorel=.tmp_kallsyms1rel.o
-elif [ -n "${CONFIG_KALLSYMS}" ]; then
+if [ -n "${CONFIG_KALLSYMS}" ]; then
 
 	# kallsyms support
 	# Generate section listing all symbols and add it into vmlinux
@@ -402,53 +338,7 @@ elif [ -n "${CONFIG_KALLSYMS}" ]; then
 	fi
 fi
 
-if [ -z "${CONFIG_SINGLE_LINK}" ] ; then
-
-info LDFINAL vmlinux
-vmlinux_link vmlinux "${kallsymso} ${kallsymsorel}" ${btf_vmlinux_bin_o}
-
-else
-
-# Reuse the partial linking from the modpost vmlinux.o earlier
-
-info LD vmlinux
-${LD} ${KBUILD_LDFLAGS} ${LDFLAGS_vmlinux}	\
-			-o vmlinux		\
-			-T ${objtree}/${KBUILD_LDS} \
-			vmlinux.o ${kallsymso} ${kallsymsorel} ${btf_vmlinux_bin_o}
-
-fi
-
-if [ -n "${CONFIG_KALLSYMS}" -a -n "${CONFIG_KALLSYMS_SINGLE}" ] ; then
-	# Now regenerate the kallsyms table and patch it into the
-	# previously linked file. We tell kallsyms to pad it
-	# to the previous length, so that no symbol changes.
-	info KALLSYMS2 .tmp_kallsyms2.o
-	kallsyms_s vmlinux .tmp_kallsyms2.S `cat .kallsyms_pad`
-	kallsyms_o .tmp_kallsyms2.S .tmp_kallsyms2.o -DNO_REL
-
-	# sanity check the offsets
-	${NM} .tmp_kallsyms1.o >.tmp_kallsyms1.nm
-	${NM} .tmp_kallsyms2.o >.tmp_kallsyms2.nm
-	cmp .tmp_kallsyms1.nm .tmp_kallsyms2.nm
-	rm .tmp_kallsyms[12].nm
-
-	info OBJCOPY .tmp_kallsyms2.bin
-	${OBJCOPY} -O binary .tmp_kallsyms2.o .tmp_kallsyms2.bin
-
-	info PATCHFILE vmlinux
-	EF=scripts/elf_file_offset
-	if [ ! -r $EF ] ; then EF=source/$EF ; fi
-	SIZE=`stat -c%s .tmp_kallsyms2.bin`
-	OFF=`${OBJDUMP} --section-headers vmlinux |
-	     gawk -f $EF -v section=.kallsyms -v filesize=$SIZE`
-	if [ -z "$OFF" ] ; then
-		echo "Cannot find .kallsyms section in vmlinux binary"
-		exit 1
-	fi
-	scripts/patchfile vmlinux $OFF .tmp_kallsyms2.bin
-	kallsyms_vmlinux=vmlinux
-fi
+vmlinux_link vmlinux "${kallsymso}" ${btf_vmlinux_bin_o}
 
 # fill in BTF IDs
 if [ -n "${CONFIG_DEBUG_INFO_BTF}" ]; then
